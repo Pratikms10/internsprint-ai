@@ -101,3 +101,103 @@ def match_internships():
         "totalMatches": len(ranked),
         "matches": ranked
     })
+@match_bp.route('/api/match/students', methods=['POST'])
+def match_students():
+    """
+    POST /api/match/students
+    Body: { "requiredSkills": "Java,React,MySQL", "internshipId": 1 }
+    Returns ranked list of students by skill match score.
+    """
+    data = request.get_json(silent=True) or {}
+    required_skills = data.get('requiredSkills', '')
+
+    if not required_skills:
+        return jsonify({ "success": False, "message": "requiredSkills is required" }), 400
+
+    # Get all students with skills
+    try:
+        conn = get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.name, u.email,
+                       sp.skills, sp.college, sp.degree,
+                       sp.cgpa, sp.linkedin, sp.github,
+                       sp.resume_url, sp.bio
+                FROM users u
+                JOIN student_profiles sp ON sp.user_id = u.id
+                WHERE u.role = 'student'
+                AND u.is_active = 1
+                AND sp.skills IS NOT NULL
+                AND sp.skills != ''
+            """)
+            students = cursor.fetchall()
+        conn.close()
+    except Exception as e:
+        return jsonify({ "success": False, "message": str(e) }), 500
+
+    if not students:
+        return jsonify({ "success": True, "matches": [], "totalMatches": 0 })
+
+    # Build corpus
+    corpus = [required_skills.lower()]
+    valid_students = []
+
+    for s in students:
+        skills = s.get('skills') or ''
+        if isinstance(skills, bytes):
+            skills = skills.decode('utf-8')
+        if skills:
+            corpus.append(skills.lower())
+            valid_students.append(s)
+
+    if len(corpus) < 2:
+        return jsonify({ "success": True, "matches": [], "totalMatches": 0 })
+
+    # TF-IDF matching
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    try:
+        vectorizer = TfidfVectorizer(
+            analyzer='word',
+            token_pattern=r'[a-zA-Z0-9\+\#\.]+',
+            ngram_range=(1, 2)
+        )
+        tfidf_matrix = vectorizer.fit_transform(corpus)
+    except Exception:
+        return jsonify({ "success": True, "matches": [], "totalMatches": 0 })
+
+    role_vec = tfidf_matrix[0]
+    student_vecs = tfidf_matrix[1:]
+    similarities = cosine_similarity(role_vec, student_vecs)[0]
+
+    results = []
+    for student, score in zip(valid_students, similarities):
+        # Convert bytes fields
+        for key, val in student.items():
+            if isinstance(val, bytes):
+                student[key] = bool(val[0]) if val else False
+
+        results.append({
+            "id": student['id'],
+            "name": student['name'],
+            "email": student['email'],
+            "skills": student['skills'],
+            "college": student['college'],
+            "degree": student['degree'],
+            "cgpa": str(student['cgpa']) if student['cgpa'] else None,
+            "linkedin": student['linkedin'],
+            "github": student['github'],
+            "bio": student['bio'],
+            "matchScore": round(float(score), 4),
+            "matchPercent": round(float(score) * 100, 1),
+        })
+
+    results.sort(key=lambda x: x['matchScore'], reverse=True)
+
+    return jsonify({
+        "success": True,
+        "requiredSkills": required_skills,
+        "totalMatches": len(results),
+        "matches": results
+    })

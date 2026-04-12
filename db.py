@@ -4,18 +4,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "bvruysje8hnyddzrnmgo-mysql.services.clever-cloud.com"),
+    "port": int(os.getenv("DB_PORT", 3306)),
+    "user": os.getenv("DB_USER", "usvqkhlcpxivmogv"),
+    "password": os.getenv("DB_PASSWORD", "o1g58IKOhrNTkmSf4P7t"),
+    "database": os.getenv("DB_NAME", "bvruysje8hnyddzrnmgo"),
+    "cursorclass": pymysql.cursors.DictCursor,
+    "connect_timeout": 10,
+    "autocommit": True,
+}
+
 def get_connection():
-    return pymysql.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        port=int(os.getenv("DB_PORT", 3306)),
-        user=os.getenv("DB_USER", "root"),
-        password=os.getenv("DB_PASSWORD", ""),
-        database=os.getenv("DB_NAME", "internsprint"),
-        cursorclass=pymysql.cursors.DictCursor
-    )
+    return pymysql.connect(**DB_CONFIG)
 
 def get_all_internships():
-    """Fetch all open internships from MySQL"""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
@@ -29,7 +32,6 @@ def get_all_internships():
                 WHERE i.status = 'open'
             """)
             rows = cursor.fetchall()
-            # Convert any remaining bytes/date objects to serializable types
             for row in rows:
                 for key, val in row.items():
                     if isinstance(val, bytes):
@@ -41,7 +43,6 @@ def get_all_internships():
         conn.close()
 
 def get_student_skills(user_id):
-    """Fetch a student's skills from their profile"""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:

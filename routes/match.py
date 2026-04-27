@@ -2,8 +2,7 @@ from flask import Blueprint, request, jsonify
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
-from db import get_all_internships, get_student_skills
-
+from db import get_all_internships, get_student_skills, get_connection
 match_bp = Blueprint('match', __name__)
 
 def compute_matches(student_skills: str, internships: list) -> list:

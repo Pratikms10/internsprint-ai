@@ -6,7 +6,13 @@ import os
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:3000", os.getenv("CORS_ORIGIN", "*")])
+
+# Fix: read CORS_ORIGINS (plural) and support comma-separated list
+cors_origins = os.getenv("CORS_ORIGINS", "*")
+if cors_origins != "*":
+    cors_origins = [o.strip() for o in cors_origins.split(",")]
+
+CORS(app, origins=cors_origins, supports_credentials=False)
 
 from routes.match import match_bp
 from routes.skillgap import skillgap_bp

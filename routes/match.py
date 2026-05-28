@@ -1,75 +1,76 @@
 from flask import Blueprint, request, jsonify
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
 from db import get_all_internships, get_student_skills, get_connection
+
 match_bp = Blueprint('match', __name__)
 
+
+def normalize_skills(skills_str):
+    """Parse comma-separated skills into a normalized set."""
+    if not skills_str:
+        return set()
+    return set(s.strip().lower() for s in skills_str.split(',') if s.strip())
+
+
+def skill_overlap_score(student_skills_str, required_skills_str):
+    """
+    Returns what fraction of required skills the student has.
+    Consistent, deterministic, corpus-independent.
+    Partial match: 'spring boot' matches if student has 'spring' or 'boot'.
+    """
+    student_set = normalize_skills(student_skills_str)
+    required_set = normalize_skills(required_skills_str)
+
+    if not required_set:
+        return 0.0
+    if not student_set:
+        return 0.0
+
+    matched = 0
+    for req_skill in required_set:
+        # Exact match
+        if req_skill in student_set:
+            matched += 1
+            continue
+        # Partial match (e.g. "spring boot" contains "spring")
+        req_words = set(req_skill.split())
+        for student_skill in student_set:
+            student_words = set(student_skill.split())
+            if req_words & student_words:  # any word overlap
+                matched += 0.5
+                break
+
+    return min(matched / len(required_set), 1.0)
+
+
 def compute_matches(student_skills: str, internships: list) -> list:
-    """
-    Rank internships by cosine similarity between
-    student skills and internship required skills.
-    Returns internships sorted by match score (highest first).
-    """
-    if not student_skills or not internships:
-        return []
-
-    # Build corpus: student skills + all internship skill sets
-    corpus = [student_skills.lower()]
-    valid = []
-
-    for i in internships:
-        skills = i.get('skills_required') or i.get('domain') or ''
-        if skills:
-            corpus.append(skills.lower())
-            valid.append(i)
-
-    if len(corpus) < 2:
-        # No internship has skills data — return all unranked
-        return [{ **i, "matchScore": 0, "matchPercent": 0 } for i in internships]
-
-    # TF-IDF vectorization
-    vectorizer = TfidfVectorizer(
-        analyzer='word',
-        token_pattern=r'[a-zA-Z0-9\+\#\.]+',  # handles C++, C#, Node.js
-        ngram_range=(1, 2)
-    )
-
-    try:
-        tfidf_matrix = vectorizer.fit_transform(corpus)
-    except ValueError:
-        return [{ **i, "matchScore": 0, "matchPercent": 0 } for i in internships]
-
-    # Similarity between student vector (index 0) and each internship
-    student_vec = tfidf_matrix[0]
-    internship_vecs = tfidf_matrix[1:]
-    similarities = cosine_similarity(student_vec, internship_vecs)[0]
-
-    # Attach scores
     scored = []
-    for i, (internship, score) in enumerate(zip(valid, similarities)):
+    for internship in internships:
+        req_str = internship.get('skills_required') or internship.get('domain') or ''
+        score = skill_overlap_score(student_skills, req_str)
         scored.append({
             **internship,
-            "matchScore": round(float(score), 4),
-            "matchPercent": round(float(score) * 100, 1)
+            "matchScore": round(score, 4),
+            "matchPercent": round(score * 100, 1)
         })
+    scored.sort(key=lambda x: x["matchScore"], reverse=True)
+    return scored
 
-    # Sort descending
+
+def compute_student_matches(required_skills: str, students: list) -> list:
+    scored = []
+    for student in students:
+        student_skills = student.get('skills') or ''
+        if isinstance(student_skills, bytes):
+            student_skills = student_skills.decode('utf-8')
+        score = skill_overlap_score(student_skills, required_skills)
+        scored.append({**student, "matchScore": round(score, 4), "matchPercent": round(score * 100, 1)})
     scored.sort(key=lambda x: x["matchScore"], reverse=True)
     return scored
 
 
 @match_bp.route('/api/match', methods=['POST'])
 def match_internships():
-    """
-    POST /api/match
-    Body: { "userId": 1 }   OR   { "skills": "Java,React,MySQL" }
-
-    Returns ranked list of internships by skill match.
-    """
     data = request.get_json(silent=True) or {}
-
-    # Get student skills
     user_id = data.get('userId')
     skills = data.get('skills', '')
 
@@ -77,43 +78,28 @@ def match_internships():
         try:
             skills = get_student_skills(int(user_id))
         except Exception as e:
-            return jsonify({ "success": False, "message": str(e) }), 500
+            return jsonify({"success": False, "message": str(e)}), 500
 
     if not skills:
-        return jsonify({
-            "success": False,
-            "message": "No skills provided. Update your profile first."
-        }), 400
+        return jsonify({"success": False, "message": "No skills provided. Update your profile first."}), 400
 
-    # Get all open internships
     try:
         internships = get_all_internships()
     except Exception as e:
-        return jsonify({ "success": False, "message": str(e) }), 500
+        return jsonify({"success": False, "message": str(e)}), 500
 
-    # Compute matches
     ranked = compute_matches(skills, internships)
+    return jsonify({"success": True, "studentSkills": skills, "totalMatches": len(ranked), "matches": ranked})
 
-    return jsonify({
-        "success": True,
-        "studentSkills": skills,
-        "totalMatches": len(ranked),
-        "matches": ranked
-    })
+
 @match_bp.route('/api/match/students', methods=['POST'])
 def match_students():
-    """
-    POST /api/match/students
-    Body: { "requiredSkills": "Java,React,MySQL", "internshipId": 1 }
-    Returns ranked list of students by skill match score.
-    """
     data = request.get_json(silent=True) or {}
     required_skills = data.get('requiredSkills', '')
 
     if not required_skills:
-        return jsonify({ "success": False, "message": "requiredSkills is required" }), 400
+        return jsonify({"success": False, "message": "requiredSkills is required"}), 400
 
-    # Get all students with skills
     try:
         conn = get_connection()
         with conn.cursor() as cursor:
@@ -124,79 +110,54 @@ def match_students():
                        sp.resume_url, sp.bio
                 FROM users u
                 JOIN student_profiles sp ON sp.user_id = u.id
-                WHERE u.role = 'student'
-                AND u.is_active = 1
-                AND sp.skills IS NOT NULL
-                AND sp.skills != ''
+                WHERE u.role = 'student' AND u.is_active = 1
+                AND sp.skills IS NOT NULL AND sp.skills != ''
             """)
             students = cursor.fetchall()
         conn.close()
     except Exception as e:
-        return jsonify({ "success": False, "message": str(e) }), 500
+        return jsonify({"success": False, "message": str(e)}), 500
 
     if not students:
-        return jsonify({ "success": True, "matches": [], "totalMatches": 0 })
+        return jsonify({"success": True, "matches": [], "totalMatches": 0})
 
-    # Build corpus
-    corpus = [required_skills.lower()]
-    valid_students = []
-
+    # Clean bytes fields
+    clean_students = []
     for s in students:
-        skills = s.get('skills') or ''
-        if isinstance(skills, bytes):
-            skills = skills.decode('utf-8')
-        if skills:
-            corpus.append(skills.lower())
-            valid_students.append(s)
+        clean = {}
+        for k, v in s.items():
+            if isinstance(v, bytes):
+                clean[k] = bool(v[0]) if v else False
+            elif hasattr(v, 'isoformat'):
+                clean[k] = v.isoformat()
+            else:
+                clean[k] = v
+        clean_students.append(clean)
 
-    if len(corpus) < 2:
-        return jsonify({ "success": True, "matches": [], "totalMatches": 0 })
+    results = compute_student_matches(required_skills, clean_students)
 
-    # TF-IDF matching
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.metrics.pairwise import cosine_similarity
-
-    try:
-        vectorizer = TfidfVectorizer(
-            analyzer='word',
-            token_pattern=r'[a-zA-Z0-9\+\#\.]+',
-            ngram_range=(1, 2)
-        )
-        tfidf_matrix = vectorizer.fit_transform(corpus)
-    except Exception:
-        return jsonify({ "success": True, "matches": [], "totalMatches": 0 })
-
-    role_vec = tfidf_matrix[0]
-    student_vecs = tfidf_matrix[1:]
-    similarities = cosine_similarity(role_vec, student_vecs)[0]
-
-    results = []
-    for student, score in zip(valid_students, similarities):
-        # Convert bytes fields
-        for key, val in student.items():
-            if isinstance(val, bytes):
-                student[key] = bool(val[0]) if val else False
-
-        results.append({
-            "id": student['id'],
-            "name": student['name'],
-            "email": student['email'],
-            "skills": student['skills'],
-            "college": student['college'],
-            "degree": student['degree'],
-            "cgpa": str(student['cgpa']) if student['cgpa'] else None,
-            "linkedin": student['linkedin'],
-            "github": student['github'],
-            "bio": student['bio'],
-            "matchScore": round(float(score), 4),
-            "matchPercent": round(float(score) * 100, 1),
+    # Format output
+    formatted = []
+    for r in results:
+        formatted.append({
+            "id": r.get('id'),
+            "name": r.get('name'),
+            "email": r.get('email'),
+            "skills": r.get('skills'),
+            "college": r.get('college'),
+            "degree": r.get('degree'),
+            "cgpa": str(r['cgpa']) if r.get('cgpa') else None,
+            "linkedin": r.get('linkedin'),
+            "github": r.get('github'),
+            "bio": r.get('bio'),
+            "resumeUrl": r.get('resume_url'),
+            "matchScore": r.get('matchScore'),
+            "matchPercent": r.get('matchPercent'),
         })
-
-    results.sort(key=lambda x: x['matchScore'], reverse=True)
 
     return jsonify({
         "success": True,
         "requiredSkills": required_skills,
-        "totalMatches": len(results),
-        "matches": results
+        "totalMatches": len(formatted),
+        "matches": formatted
     })
